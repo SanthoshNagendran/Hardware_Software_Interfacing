@@ -1,0 +1,4 @@
+https://www.controllerstech.com/adxl345-accelerometer-using-stm32/
+https://forum.sparkfun.com/viewtopic.php?t=30661
+
+https://www.controllerstech.com/how-to-use-spi-with-stm32/

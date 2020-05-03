@@ -1,0 +1,404 @@
+/*
+Library:					NRF24L01/NRF24L01+
+Written by:				Mohamed Yaqoob (MYaqoobEmbedded YouTube Channel)
+Date Written:			10/11/2018
+Last modified:		-/-
+Description:			This is an STM32 device driver library for the NRF24L01 Nordic Radio transceiver, using STM HAL libraries
+
+References:				This library was written based on the Arduino NRF24 Open-Source library by J. Coliz and the NRF24 datasheet
+										- https://github.com/maniacbug/RF24
+										- https://www.sparkfun.com/datasheets/Components/SMD/nRF24L01Pluss_Preliminary_Product_Specification_v1_0.pdf
+										
+* Copyright (C) 2018 - M. Yaqoob
+   This is a free software under the GNU license, you can redistribute it and/or modify it under the terms
+   of the GNU General Public Licenseversion 3 as published by the Free Software Foundation.
+	
+   This software library is shared with puplic for educational purposes, without WARRANTY and Author is not liable for any damages caused directly
+   or indirectly by this software, read more about this on the GNU General Public License.
+*/
+
+
+#include "stm32f3xx_hal.h"
+#include "stm32f3xx_hal_gpio.h"
+ #include "stm32f3xx_hal_spi.h"
+#include <stdlib.h>
+#include <stdbool.h>
+#include <string.h>
+
+#include <stdio.h>
+#include <stdint.h>
+#include <ctype.h>
+
+#include "common.h"
+
+
+#define _BV(x) (1<<(x))
+
+/* Memory Map */
+#define REG_CONFIG      0x00
+#define REG_EN_AA       0x01
+#define REG_EN_RXADDR   0x02
+#define REG_SETUP_AW    0x03
+#define REG_SETUP_RETR  0x04
+#define REG_RF_CH       0x05
+#define REG_RF_SETUP    0x06
+#define REG_STATUS      0x07
+#define REG_OBSERVE_TX  0x08
+#define REG_CD          0x09
+#define REG_RX_ADDR_P0  0x0A
+#define REG_RX_ADDR_P1  0x0B
+#define REG_RX_ADDR_P2  0x0C
+#define REG_RX_ADDR_P3  0x0D
+#define REG_RX_ADDR_P4  0x0E
+#define REG_RX_ADDR_P5  0x0F
+#define REG_TX_ADDR     0x10
+#define REG_RX_PW_P0    0x11
+#define REG_RX_PW_P1    0x12
+#define REG_RX_PW_P2    0x13
+#define REG_RX_PW_P3    0x14
+#define REG_RX_PW_P4    0x15
+#define REG_RX_PW_P5    0x16
+#define REG_FIFO_STATUS 0x17
+#define REG_DYNPD	    	0x1C
+#define REG_FEATURE	    0x1D
+
+/* Bit Mnemonics */
+#define MASK_RX_DR  6
+#define MASK_TX_DS  5
+#define MASK_MAX_RT 4
+#define BIT_EN_CRC      3
+#define BIT_CRCO        2
+#define BIT_PWR_UP      1
+#define BIT_PRIM_RX     0
+#define BIT_ENAA_P5     5
+#define BIT_ENAA_P4     4
+#define BIT_ENAA_P3     3
+#define BIT_ENAA_P2     2
+#define BIT_ENAA_P1     1
+#define BIT_ENAA_P0     0
+#define BIT_ERX_P5      5
+#define BIT_ERX_P4      4
+#define BIT_ERX_P3      3
+#define BIT_ERX_P2      2
+#define BIT_ERX_P1      1
+#define BIT_ERX_P0      0
+#define BIT_AW          0
+#define BIT_ARD         4
+#define BIT_ARC         0
+#define BIT_PLL_LOCK    4
+#define BIT_RF_DR       3
+#define BIT_RF_PWR      6
+#define BIT_RX_DR       6
+#define BIT_TX_DS       5
+#define BIT_MAX_RT      4
+#define BIT_RX_P_NO     1
+#define BIT_TX_FULL     0
+#define BIT_PLOS_CNT    4
+#define BIT_ARC_CNT     0
+#define BIT_TX_REUSE    6
+#define BIT_FIFO_FULL   5
+#define BIT_TX_EMPTY    4
+#define BIT_RX_FULL     1
+#define BIT_RX_EMPTY    0
+#define BIT_DPL_P5	    5
+#define BIT_DPL_P4	    4
+#define BIT_DPL_P3	    3
+#define BIT_DPL_P2	    2
+#define BIT_DPL_P1	    1
+#define BIT_DPL_P0	    0
+#define BIT_EN_DPL	    2
+#define BIT_EN_ACK_PAY  1
+#define BIT_EN_DYN_ACK  0
+
+/* Instruction Mnemonics */
+#define CMD_R_REGISTER    0x00
+#define CMD_W_REGISTER    0x20
+#define CMD_REGISTER_MASK 0x1F
+#define CMD_ACTIVATE      0x50
+#define CMD_R_RX_PL_WID   0x60
+#define CMD_R_RX_PAYLOAD  0x61
+#define CMD_W_TX_PAYLOAD  0xA0
+#define CMD_W_ACK_PAYLOAD 0xA8
+#define CMD_FLUSH_TX      0xE1
+#define CMD_FLUSH_RX      0xE2
+#define CMD_REUSE_TX_PL   0xE3
+#define CMD_NOP           0xFF
+
+/* Non-P omissions */
+#define LNA_HCURR   0
+
+/* P model memory Map */
+#define REG_RPD         0x09
+
+/* P model bit Mnemonics */
+#define RF_DR_LOW   5
+#define RF_DR_HIGH  3
+#define RF_PWR_LOW  1
+#define RF_PWR_HIGH 2
+
+#define CSNpin_Pin GPIO_PIN_0
+#define CEpin_Pin GPIO_PIN_1
+
+
+SPI_HandleTypeDef hspi2;
+
+UART_HandleTypeDef huart1;
+
+
+typedef enum { 
+	RF24_PA_m18dB = 0,
+	RF24_PA_m12dB,
+	RF24_PA_m6dB,
+	RF24_PA_0dB,
+	RF24_PA_ERROR 
+}rf24_pa_dbm_e ;
+//2. NRF24_setDataRate() input
+typedef enum { 
+	RF24_1MBPS = 0,
+	RF24_2MBPS,
+	RF24_250KBPS
+}rf24_datarate_e;
+//3. NRF24_setCRCLength() input
+typedef enum { 
+	RF24_CRC_DISABLED = 0,
+	RF24_CRC_8,
+	RF24_CRC_16
+}rf24_crclength_e;
+
+
+
+void NRF24_DelayMicroSeconds(uint32_t uSec);
+
+//1. Chip Select function
+void NRF24_csn(int mode);
+//2. Chip Enable
+void NRF24_ce(int level);
+//3. Read single byte from a register
+uint8_t NRF24_read_register(uint8_t reg);
+//4. Read multiple bytes register
+void NRF24_read_registerN(uint8_t reg, uint8_t *buf, uint8_t len);
+//5. Write single byte register
+void NRF24_write_register(uint8_t reg, uint8_t value);
+//6. Write multipl bytes register
+void NRF24_write_registerN(uint8_t reg, const uint8_t* buf, uint8_t len);
+//7. Write transmit payload
+void NRF24_write_payload(const void* buf, uint8_t len);
+//8. Read receive payload
+void NRF24_read_payload(void* buf, uint8_t len);
+//9. Flush Tx buffer
+void NRF24_flush_tx(void);
+//10. Flush Rx buffer
+void NRF24_flush_rx(void);
+//11. Get status register value
+uint8_t NRF24_get_status(void);
+
+//12. Begin function
+void NRF24_begin(GPIO_TypeDef *nrf24PORT, uint16_t nrfCSN_Pin, uint16_t nrfCE_Pin, SPI_HandleTypeDef nrfSPI);
+//13. Listen on open pipes for reading (Must call NRF24_openReadingPipe() first)
+void NRF24_startListening(void);
+//14. Stop listening (essential before any write operation)
+void NRF24_stopListening(void);
+
+//15. Write(Transmit data), returns true if successfully sent
+bool NRF24_write( const void* buf, uint8_t len );
+//16. Check for available data to read
+bool NRF24_available(void);
+//17. Read received data
+bool NRF24_read( void* buf, uint8_t len );
+//18. Open Tx pipe for writing (Cannot perform this while Listenning, has to call NRF24_stopListening)
+void NRF24_openWritingPipe(uint64_t address);
+//19. Open reading pipe
+void NRF24_openReadingPipe(uint8_t number, uint64_t address);
+//20 set transmit retries (rf24_Retries_e) and delay
+void NRF24_setRetries(uint8_t delay, uint8_t count);
+//21. Set RF channel frequency
+void NRF24_setChannel(uint8_t channel);
+//22. Set payload size
+void NRF24_setPayloadSize(uint8_t size);
+//23. Get payload size
+uint8_t NRF24_getPayloadSize(void);
+//24. Get dynamic payload size, of latest packet received
+uint8_t NRF24_getDynamicPayloadSize(void);
+//25. Enable payload on Ackknowledge packet
+void NRF24_enableAckPayload(void);
+//26. Enable dynamic payloads
+void NRF24_enableDynamicPayloads(void);
+void NRF24_disableDynamicPayloads(void);
+//27. Check if module is NRF24L01+ or normal module
+bool NRF24_isNRF_Plus(void) ;
+//28. Set Auto Ack for all
+void NRF24_setAutoAck(bool enable);
+//29. Set Auto Ack for certain pipe
+void NRF24_setAutoAckPipe( uint8_t pipe, bool enable ) ;
+//30. Set transmit power level
+void NRF24_setPALevel( rf24_pa_dbm_e level ) ;
+//31. Get transmit power level
+rf24_pa_dbm_e NRF24_getPALevel( void ) ;
+//32. Set data rate (250 Kbps, 1Mbps, 2Mbps)
+bool NRF24_setDataRate(rf24_datarate_e speed);
+//33. Get data rate
+rf24_datarate_e NRF24_getDataRate( void );
+//34. Set crc length (disable, 8-bits or 16-bits)
+void NRF24_setCRCLength(rf24_crclength_e length);
+//35. Get CRC length
+rf24_crclength_e NRF24_getCRCLength(void);
+//36. Disable CRC
+void NRF24_disableCRC( void ) ;
+//37. power up
+void NRF24_powerUp(void) ;
+//38. power down
+void NRF24_powerDown(void);
+//39. Check if data are available and on which pipe (Use this for multiple rx pipes)
+bool NRF24_availablePipe(uint8_t* pipe_num);
+//40. Start write (for IRQ mode)
+void NRF24_startWrite( const void* buf, uint8_t len );
+//41. Write acknowledge payload
+void NRF24_writeAckPayload(uint8_t pipe, const void* buf, uint8_t len);
+//42. Check if an Ack payload is available
+bool NRF24_isAckPayloadAvailable(void);
+//43. Check interrupt flags
+void NRF24_whatHappened(bool *tx_ok,bool *tx_fail,bool *rx_ready);
+//44. Test if there is a carrier on the previous listenning period (useful to check for intereference)
+bool NRF24_testCarrier(void);
+//45. Test if a signal carrier exists (=> -64dB), only for NRF24L01+
+bool NRF24_testRPD(void) ;
+//46. Reset Status
+void NRF24_resetStatus(void);
+//47. ACTIVATE cmd
+void NRF24_ACTIVATE_cmd(void);
+//48. Get AckPayload Size
+uint8_t NRF24_GetAckPayloadSize(void);
+
+//**********  DEBUG Functions **********//
+//1. Print radio settings
+void printRadioSettings(void);
+//2. Print Status 
+void printStatusReg(void);
+//3. Print Config 
+void printConfigReg(void);
+//4. Init Variables
+void nrf24_DebugUART_Init(UART_HandleTypeDef nrf24Uart);
+//5. FIFO Status
+void printFIFOstatus(void);
+
+
+static void MX_GPIO_Init(void);
+static void MX_SPI2_Init(void);
+static void MX_USART1_UART_Init(void);
+
+
+uint64_t RxpipeAddrs = 0x11223344AA;
+char myRxData[50];
+char myAckPayload[32] = "Ack by STMF7!";
+
+
+int Receiver(void)
+{
+  /* Initialize all configured peripherals */
+  MX_GPIO_Init();
+  MX_SPI2_Init();
+  MX_USART1_UART_Init();
+
+  /* USER CODE BEGIN 2 */
+	NRF24_begin(GPIOA, GPIO_PIN_8, GPIO_PIN_15, hspi2);
+	nrf24_DebugUART_Init(huart1);
+	
+	printRadioSettings();
+	
+	NRF24_setAutoAck(true);
+	NRF24_setChannel(52);
+	NRF24_setPayloadSize(32);
+	NRF24_openReadingPipe(1, RxpipeAddrs);
+	NRF24_enableDynamicPayloads();
+	NRF24_enableAckPayload();
+	
+	NRF24_startListening();
+  /* USER CODE END 2 */
+
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
+  while (1)
+  {
+  /* USER CODE END WHILE */
+
+  /* USER CODE BEGIN 3 */
+		if(NRF24_available())
+		{
+			NRF24_read(myRxData, 32);
+			printf("the data received is %s\n",myRxData);
+			NRF24_writeAckPayload(1, myAckPayload, 32);
+			myRxData[32] = '\r'; myRxData[32+1] = '\n';
+			HAL_UART_Transmit(&huart1, (uint8_t *)myRxData, 32+2, 10);
+		}
+
+  }
+  /* USER CODE END 3 */
+
+}
+/* SPI2 init function */
+static void MX_SPI2_Init(void)
+{
+
+  hspi2.Instance = SPI2;
+  hspi2.Init.Mode = SPI_MODE_MASTER;
+  hspi2.Init.Direction = SPI_DIRECTION_2LINES;
+  hspi2.Init.DataSize = SPI_DATASIZE_8BIT;
+  hspi2.Init.CLKPolarity = SPI_POLARITY_LOW;
+  hspi2.Init.CLKPhase = SPI_PHASE_1EDGE;
+  hspi2.Init.NSS = SPI_NSS_SOFT;
+  hspi2.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_32;
+  hspi2.Init.FirstBit = SPI_FIRSTBIT_MSB;
+  hspi2.Init.TIMode = SPI_TIMODE_DISABLE;
+  hspi2.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
+  hspi2.Init.CRCPolynomial = 7;
+  hspi2.Init.CRCLength = SPI_CRC_LENGTH_DATASIZE;
+  hspi2.Init.NSSPMode = SPI_NSS_PULSE_ENABLE;
+  if (HAL_SPI_Init(&hspi2) != HAL_OK)
+  {
+    _Error_Handler(__FILE__, __LINE__);
+  }
+
+}
+
+/* USART1 init function */
+static void MX_USART1_UART_Init(void)
+{
+
+  huart1.Instance = USART1;
+  huart1.Init.BaudRate = 115200;
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits = UART_STOPBITS_1;
+  huart1.Init.Parity = UART_PARITY_NONE;
+  huart1.Init.Mode = UART_MODE_TX_RX;
+  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart1) != HAL_OK)
+  {
+    _Error_Handler(__FILE__, __LINE__);
+  }
+
+}
+
+static void MX_GPIO_Init(void)
+{
+
+  GPIO_InitTypeDef GPIO_InitStruct;
+
+  /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+  //__HAL_RCC_GPIOI_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_15|GPIO_PIN_8, GPIO_PIN_RESET);
+
+  /*Configure GPIO pins : PA15 PA8 */
+  GPIO_InitStruct.Pin = GPIO_PIN_15|GPIO_PIN_8;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+}
